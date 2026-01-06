@@ -10,18 +10,22 @@ load_dotenv()
 logger = RLMLogger(log_dir="./logs")
 
 rlm = RLM(
-    backend="openai",  # or "portkey", etc.
+    backend="gemini",  # or "portkey", etc.
     backend_kwargs={
-        "model_name": "gpt-5-nano",
-        "api_key": os.getenv("OPENAI_API_KEY"),
+        "model_name": "gemini-2.5-flash",
+        "api_key": os.getenv("GOOGLE_API_KEY"),
     },
     environment="local",
     environment_kwargs={},
     max_depth=1,
     logger=logger,
     verbose=True,  # For printing to console with rich, disabled by default.
+    async_enabled=True,  # Enable spawn() function for parallel subtasks
 )
 
-result = rlm.completion("Print me the first 100 powers of two, each on a newline.")
+with open("examples/question.txt", "r") as f:
+    question = f.read()
+
+result = rlm.completion(question)
 
 print(result)

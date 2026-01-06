@@ -51,6 +51,7 @@ class RLM:
         other_backend_kwargs: list[dict[str, Any]] | None = None,
         logger: RLMLogger | None = None,
         verbose: bool = False,
+        async_enabled: bool = False,
     ):
         """
         Args:
@@ -66,6 +67,7 @@ class RLM:
             other_backend_kwargs: The kwargs to pass to the other client backends (ordered to match other_backends).
             logger: The logger to use for the RLM.
             verbose: Whether to print verbose output in rich to console.
+            async_enabled: Whether to enable async spawn() function for parallel subtasks.
         """
         # Store config for spawning per-completion
         self.backend = backend
@@ -83,6 +85,7 @@ class RLM:
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
+        self.async_enabled = async_enabled
 
         # Log metadata if logger is provided
         if self.logger or verbose:
@@ -126,6 +129,22 @@ class RLM:
         env_kwargs = self.environment_kwargs.copy()
         env_kwargs["lm_handler_address"] = (lm_handler.host, lm_handler.port)
         env_kwargs["context_payload"] = prompt
+        env_kwargs["async_enabled"] = self.async_enabled
+        env_kwargs["_rlm_config"] = {
+            "backend": self.backend,
+            "backend_kwargs": self.backend_kwargs,
+            "environment": self.environment_type,
+            "environment_kwargs": self.environment_kwargs,
+            "depth": self.depth,
+            "max_depth": self.max_depth,
+            "max_iterations": self.max_iterations,
+            "custom_system_prompt": self.system_prompt if self.system_prompt != RLM_SYSTEM_PROMPT else None,
+            "other_backends": self.other_backends,
+            "other_backend_kwargs": self.other_backend_kwargs,
+            "logger": self.logger,
+            "verbose": self.verbose.enabled,
+            "async_enabled": self.async_enabled,
+        }
 
         # Initialize the environment
         environment: BaseEnv = get_environment(self.environment_type, env_kwargs)

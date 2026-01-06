@@ -122,6 +122,8 @@ class LocalREPL(NonIsolatedEnv):
         lm_handler_address: tuple[str, int] | None = None,
         context_payload: dict | list | str | None = None,
         setup_code: str | None = None,
+        async_enabled: bool = False,
+        _rlm_config: dict[str, Any] | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -130,6 +132,11 @@ class LocalREPL(NonIsolatedEnv):
         self.original_cwd = os.getcwd()
         self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_{uuid.uuid4()}_")
         self._lock = threading.Lock()
+        self.async_enabled = async_enabled
+        self._rlm_config = _rlm_config or {}
+        self._spawned_tasks: dict[str, threading.Thread] = {}
+        self._spawn_results: dict[str, Any] = {}
+        self._spawn_lock = threading.Lock()
 
         # Setup globals, locals, and modules in environment.
         self.setup()
@@ -158,6 +165,10 @@ class LocalREPL(NonIsolatedEnv):
         self.globals["FINAL_VAR"] = self._final_var
         self.globals["llm_query"] = self._llm_query
         self.globals["llm_query_batched"] = self._llm_query_batched
+        if self.async_enabled:
+            self.globals["spawn"] = self._spawn
+            self.globals["spawn_wait"] = self._spawn_wait
+            self.globals["spawn_ready"] = self._spawn_ready
 
     def _final_var(self, variable_name: str) -> str:
         """Return the value of a variable as a final answer."""
@@ -220,6 +231,82 @@ class LocalREPL(NonIsolatedEnv):
             return results
         except Exception as e:
             return [f"Error: LM query failed - {e}"] * len(prompts)
+
+    def _spawn(self, prompt: str | dict[str, Any], task_id: str | None = None) -> str:
+        """Spawn a parallel RLM subtask that runs independently."""
+        if not self.async_enabled:
+            return "Error: async mode not enabled. Set async_enabled=True in RLM config."
+
+        if not self._rlm_config:
+            return "Error: RLM config not available for spawning subtasks."
+
+        if task_id is None:
+            task_id = f"spawn_{uuid.uuid4().hex[:8]}"
+
+        # Check if task already exists
+        with self._spawn_lock:
+            if task_id in self._spawned_tasks:
+                return f"Error: Task '{task_id}' already exists"
+
+        def run_spawned_task():
+            try:
+                # Lazy import to avoid circular dependency
+                from rlm import RLM
+
+                # Create new RLM instance with same config but depth+1
+                # Disable verbose output for spawned tasks to keep output clean
+                config = self._rlm_config.copy()
+                config["depth"] = config.get("depth", 0) + 1
+                config["verbose"] = False
+                rlm = RLM(**config)
+                result = rlm.completion(prompt)
+
+                with self._spawn_lock:
+                    self._spawn_results[task_id] = result
+            except Exception as e:
+                with self._spawn_lock:
+                    self._spawn_results[task_id] = f"Error: {e}"
+
+        thread = threading.Thread(target=run_spawned_task, daemon=True)
+        thread.start()
+
+        with self._spawn_lock:
+            self._spawned_tasks[task_id] = thread
+
+        return task_id
+
+    def _spawn_wait(self, task_id: str) -> str:
+        """Wait for a spawned task to complete and return its result."""
+        with self._spawn_lock:
+            if task_id not in self._spawned_tasks:
+                return f"Error: Task '{task_id}' not found"
+
+            thread = self._spawned_tasks[task_id]
+
+        # Wait for thread to complete
+        thread.join()
+
+        with self._spawn_lock:
+            if task_id in self._spawn_results:
+                result = self._spawn_results.pop(task_id)
+                self._spawned_tasks.pop(task_id, None)
+                if isinstance(result, str):
+                    return result
+                # If it's an RLMChatCompletion, return the response
+                if hasattr(result, "response"):
+                    return result.response
+                return str(result)
+            return f"Error: Task '{task_id}' completed but no result found"
+
+    def _spawn_ready(self, task_id: str) -> bool:
+        """Check if a spawned task has completed."""
+        with self._spawn_lock:
+            if task_id not in self._spawned_tasks:
+                return False
+            thread = self._spawned_tasks[task_id]
+            if not thread.is_alive():
+                return True
+            return False
 
     def load_context(self, context_payload: dict | list | str):
         """Load context into the environment."""

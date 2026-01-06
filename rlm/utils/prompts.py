@@ -8,9 +8,10 @@ RLM_SYSTEM_PROMPT = textwrap.dedent(
 
 The REPL environment is initialized with:
 1. A `context` variable that contains extremely important information about your query. You should check the content of the `context` variable to understand what you are working with. Make sure you look through it sufficiently as you answer your query.
-2. A `llm_query` function that allows you to query an LLM (that can handle around 500K chars) inside your REPL environment.
+2. A `llm_query` function that allows you to query an LLM (that can handle around 500K chars) inside your REPL environment. IMPORTANT: When you need a numeric result from `llm_query()` (e.g., for calculations), you MUST explicitly instruct the sub-LLM to return ONLY the numeric answer with no explanation. For example: `llm_query("What is the 12th term? Provide ONLY the numeric answer with no explanation.")`. If you need to extract a number from a response, use regex: `import re; numbers = re.findall(r'-?\d+', response); result = int(numbers[-1]) if numbers else 0`.
 3. A `llm_query_batched` function that allows you to query multiple prompts concurrently: `llm_query_batched(prompts: List[str]) -> List[str]`. This is much faster than sequential `llm_query` calls when you have multiple independent queries. Results are returned in the same order as the input prompts.
-4. The ability to use `print()` statements to view the output of your REPL code and continue your reasoning.
+4. A `spawn(prompt, task_id=None)` function (if async mode is enabled) that allows you to spawn independent parallel subtasks. Each spawned task runs in its own RLM instance and executes completely independently. Use `spawn()` when you have multiple independent tasks that can be solved in parallel to reduce overall runtime. Returns a task_id that you can use with `spawn_wait(task_id)` to get the result or `spawn_ready(task_id)` to check if it's done. Consider using `spawn()` when you have multiple independent sub-problems that don't depend on each other's results.
+5. The ability to use `print()` statements to view the output of your REPL code and continue your reasoning.
 
 You will only be able to see truncated outputs from the REPL environment, so you should use the query LLM function on variables you want to analyze. You will find this function especially useful when you have to analyze the semantics of the context. Use these variables as buffers to build up your final answer.
 Make sure to explicitly look through the entire context in REPL before answering your query. An example strategy is to first look at the context and figure out a chunking strategy, then break up the context into smart chunks, and query an LLM per chunk with a particular question and save the answers to a buffer, then query an LLM with all the buffers to produce your final answer.
@@ -22,6 +23,17 @@ When you want to execute Python code in the REPL environment, wrap it in triple 
 chunk = context[:10000]
 answer = llm_query(f"What is the magic number in the context? Here is the chunk: {{chunk}}")
 print(answer)
+```
+
+When you need a numeric result for calculations, explicitly request only the number from the sub-LLM:
+```repl
+# Calculate the 12th term of a sequence
+term_12 = llm_query("Compute the 12th term of the sequence where Term(1)=3, Term(2)=5, Term(n)=Term(n-1)*2-Term(n-2)+1. Provide ONLY the numeric answer with no explanation.")
+# If the response might still contain text, extract the number
+import re
+numbers = re.findall(r'-?\d+', term_12)
+result = int(numbers[-1]) if numbers else 0
+print(f"Term 12 = {{result}}")
 ```
 
 As an example, suppose you're trying to answer a question about a book. You can iteratively chunk the context section by section, query an LLM on that chunk, and track relevant information in a buffer.
@@ -72,6 +84,23 @@ final_answer = llm_query(f"Based on these summaries, answer the original query: 
 ```
 In the next step, we can return FINAL_VAR(final_answer).
 
+As an example of using spawn() for parallel execution, if you have multiple independent questions to answer about different sections of the context, you can spawn them in parallel:
+```repl
+# Spawn multiple independent tasks in parallel
+task1 = spawn("What is the main theme of section 1? Context: " + context["section1"])
+task2 = spawn("What is the main theme of section 2? Context: " + context["section2"])
+task3 = spawn("What is the main theme of section 3? Context: " + context["section3"])
+
+# Wait for all tasks to complete and collect results
+result1 = spawn_wait(task1)
+result2 = spawn_wait(task2)
+result3 = spawn_wait(task3)
+
+# Combine results
+final_answer = llm_query(f"Based on these independent analyses, answer the original query: {{query}}\\n\\nResults:\\n1. {{result1}}\\n2. {{result2}}\\n3. {{result3}}")
+```
+Use spawn() when tasks are truly independent - they don't need each other's results and can run simultaneously to save time. Don't use spawn() if one task depends on another's output.
+
 IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code. Do not use these tags unless you have completed your task. You have two options:
 1. Use FINAL(your final answer here) to provide the answer directly
 2. Use FINAL_VAR(variable_name) to return a variable you have created in the REPL environment as your final output
@@ -118,7 +147,7 @@ USER_PROMPT_WITH_ROOT = """Think step-by-step on what to do using the REPL envir
 
 def build_user_prompt(root_prompt: str | None = None, iteration: int = 0) -> dict[str, str]:
     if iteration == 0:
-        safeguard = "You have not interacted with the REPL environment or seen your prompt / context yet. Your next action should be to look through and figure out how to answer the prompt, so don't just provide a final answer yet.\n\n"
+        safeguard = "You have not interacted with the REPL environment or seen your prompt / context yet. Your next action should be to look through and figure out how to answer the prompt, so don't just provide a final answer yet. IMPORTANT: Do not speculate or assume what the context contains - you must first execute code to check the `context` variable before making any claims about its contents.\n\n"
         prompt = safeguard + (
             USER_PROMPT_WITH_ROOT.format(root_prompt=root_prompt) if root_prompt else USER_PROMPT
         )
